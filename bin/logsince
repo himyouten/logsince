@@ -1,0 +1,222 @@
+#!/usr/bin/env python
+"""
+logsince
+
+Print log from last line printed, creates hidden .logsince and .logsince.LCK files
+Requires sed
+
+Created by Him You Ten on 2014-04-03.
+
+The MIT License (MIT)
+
+Copyright (c) 2014 himyouten
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+from __future__ import print_function
+import sys
+import argparse
+import os
+
+debug = False
+test = False
+start = -1
+length = -1
+lastposfile = ""
+lockfile = ""
+
+def getargs():
+    """Get the command line arguments"""
+    parser = argparse.ArgumentParser(description='Print log from last line printed, creates hidden .logsince and .logsince.LCK files')
+    parser.add_argument('--start', type=int, default=-1, help="use start instead of last position")
+    parser.add_argument('--length', type=int, default=-1, help="number of lines to read, defaults to end of file")
+    parser.add_argument('--clean', help="clean up hidden files", action='store_true')
+    parser.add_argument('--debug', help="turn debug on", action='store_true')
+    parser.add_argument('--test', help="do not write to .logsince file, only read from it", action='store_true')
+    parser.add_argument('logfile', help="the logifle to parse")
+    args = parser.parse_args()
+    if args.debug:
+        print("DEBUG:","Settings: --start:{0.start} --length:{0.length} --debug:{0.debug} --test:{0.test} logfile:{0.logfile}".format(args))
+    set_globals(args)
+    return args
+
+def get_lastposfile(logfile):
+    """Return the lastpos file, .logfile_name.logsince"""
+    return '.'+logfile+'.logsince'
+
+def get_lockfile(logfile):
+    """Return the lock file, .logfile_name.logsince.LCK"""
+    return get_lastposfile(logfile)+'.LCK'
+
+def set_globals(args):
+    """Set the global variables from args"""
+    # set globals
+    global start, length, debug, test, lastposfile, lockfile
+    start = args.start
+    length = args.length
+    debug = args.debug
+    test = args.test
+    (dirname, filename) = os.path.split(args.logfile)
+    if args.debug:
+        print("DEBUG:","dirname:{0} filename:{1}".format(dirname, filename))
+    if len(dirname) > 0:
+        dirname += "/"
+    lastposfile = dirname  + get_lastposfile(filename)
+    lockfile = dirname + get_lockfile(filename)
+
+def write_lastsize(lastposfile, filesize):
+    """Writes the last size to the logsince file"""
+    if (test):
+        if debug:
+            print("DEBUG:","Test set, not writing")
+        return
+    with open(lastposfile, 'w') as f:
+        f.write(str(filesize))
+        f.write("\n")
+
+def get_lastpos(logfile, lastposfile, start=-1):
+    """
+    Read last location from .filename.logsince hidden file.
+    Ignore if start is > -1 and use start instead
+    If size is smaller, start from the beginning
+    """
+    lastpos = 1
+    filestat = os.stat(logfile)
+
+    # if start > -1, return start
+    if start > -1:
+        if debug:
+            print("DEBUG:","Start set, starting at {0}".format(start))
+        write_lastsize(lastposfile, filestat.st_size)
+        return start
+    # read lastpos file
+    if debug:
+        print("DEBUG:","Checking last pos from {0}".format(lastposfile))
+    # if not found, return 0
+    if not os.path.isfile(lastposfile):
+        if debug:
+            print("DEBUG:","Last pos file not found")
+            write_lastsize(lastposfile, filestat.st_size)
+        return 1
+    # get last pos and last size from file
+    with open(lastposfile, 'r') as f:
+        lastsize_str = f.readline()
+        lastpos_str = f.readline()
+    # check if file is smaller, if so start at the beginning
+    try:
+        lastsize = int(lastsize_str)
+    except Exception:
+        lastsize = 0
+        if debug:
+            print("DEBUG:","Last size found cannot be converted to integer, '{0}'".format(lastsize_str))
+    write_lastsize(lastposfile, filestat.st_size)
+    if filestat.st_size < lastsize:
+        if debug:
+            print("DEBUG:","File is smaller, {0} vs {1}, starting from beginning".format(filestat.st_size, lastsize))
+        return 1
+    try:
+        lastpos = int(lastpos_str) + 1
+    except:
+        lastpos = 1
+        if debug:
+            print("DEBUG:","Last pos found cannot be converted to integer, '{0}'".format(lastpos_str))
+    if debug:
+        print("DEBUG:","Starting at {0}".format(str(lastpos)))
+    return lastpos
+
+def get_length(lastpos):
+    """Return the end string for the sed"""
+    if length == -1:
+        return '$'
+    end = lastpos + length - 1
+    if debug:
+        print("DEBUG:","Stopping at {0}".format(str(end)))
+    return str(end)
+
+def lock(lockfile):
+    """Creates the lock file, if already exists, returns None, otherwise stores the pid and returns the file name"""
+    if debug:
+        print("DEBUG:","Locking with {0}".format(lockfile))
+    if os.path.isfile(lockfile):
+        if debug:
+            print("DEBUG:","Lock found")
+        return False
+    pid = os.getpid()
+    with open(lockfile, 'w') as f:
+        f.write(str(pid))
+    if debug:
+        print("DEBUG:","Wrote {0} to lockfile".format(str(pid)))
+    return True
+
+def unlock(lockfile):
+    """Deletes the lockfile, if no file exists, returns false"""
+    if debug:
+        print("DEBUG:","Unlocking {0}".format(lockfile))
+    if not os.path.isfile(lockfile):
+        return False
+    os.unlink(lockfile)
+    return True
+
+def run_sed(logfile, lastpos, length, lastposfile):
+    """Runs the sed cmd, using awk to capture the lastpos"""
+    if test:
+        if debug:
+            print("DEBUG:","Test set, not writing")
+            cmd = "sed -n '{0},{1} p' {2}".format(lastpos, length, logfile)
+    else:        
+        cmd = "sed -n '{0},{1} p' {2}|awk '{{print $0}}END{{ print NR + {0} - 1 >> \"{3}\" }}'".format(lastpos, length, logfile, lastposfile)
+    os.system(cmd)
+
+def main():
+    """
+    Gets the arguments, locks the file, gets the last position and runs the sed cmd
+    Unlocks when done
+    """
+    # get arguments
+    args = getargs()
+    global lastposfile, lockfile
+    if args.clean:
+        if debug:
+            print("DEBUG:","Cleaning up logsince hidden files")
+        for f in [lastposfile, lockfile]:
+            if os.path.isfile(f):
+                os.unlink(f)
+        exit()
+    # lock file
+    if not lock(lockfile):
+        print("ERROR:","Cannot create lock for {0}".format(args.logfile), file=sys.stderr)
+        exit(1)
+    try:
+        # read last location from .filename.logsince hidden file - ignore if start is > -1 and use start instead
+        lastpos = get_lastpos(args.logfile, lastposfile, start)
+        # check if length is passed, if not, go to end of file
+        length = get_length(lastpos)
+        # sed and pipe to script
+        run_sed(args.logfile, lastpos, length, lastposfile)
+    except Exception as e:
+        if debug:
+            print("DEBUG:","Exception caught {0}".format(e))
+    finally:
+        # unlock
+        if not unlock(lockfile):
+            print("ERROR:","Cannot unlock {0}".format(lockfile), file=sys.stderr)
+            exit(1)
+
+if __name__ == '__main__':
+    main()
