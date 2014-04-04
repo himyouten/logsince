@@ -33,6 +33,7 @@ from __future__ import print_function
 import sys
 import argparse
 import os
+import shutil
 
 debug = False
 test = False
@@ -64,6 +65,10 @@ def get_lockfile(logfile):
     """Return the lock file, .logfile_name.logsince.LCK"""
     return get_lastposfile(logfile)+'.LCK'
 
+def get_bakfile(lastposfile):
+    """Return the backup file, .logfile_name.logsince.bak"""
+    return lastposfile+'.bak'
+
 def set_globals(args):
     """Set the global variables from args"""
     # set globals
@@ -89,6 +94,8 @@ def write_lastsize(lastposfile, filesize):
     with open(lastposfile, 'w') as f:
         f.write(str(filesize))
         f.write("\n")
+        if debug:
+            print("DEBUG:","new {0} created".format(lastposfile))
 
 def get_lastpos(logfile, lastposfile, start=-1):
     """
@@ -149,6 +156,21 @@ def get_length(lastpos):
         print("DEBUG:","Stopping at {0}".format(str(end)))
     return str(end)
 
+def backupfile(lastposfile):
+    # backup the pos file
+    if os.path.isfile(lastposfile):
+        if debug:
+            print("DEBUG:","Backing up {0}".format(lastposfile))
+        shutil.copyfile(lastposfile, get_bakfile(lastposfile))
+
+def clean_backupfile(lastposfile):
+    # backup the pos file
+    bakfile = get_bakfile(lastposfile)
+    if os.path.isfile(bakfile):
+        if debug:
+            print("DEBUG:","Cleaning backup {0}".format(bakfile))
+        os.unlink(bakfile)
+
 def lock(lockfile):
     """Creates the lock file, if already exists, returns None, otherwise stores the pid and returns the file name"""
     if debug:
@@ -157,6 +179,7 @@ def lock(lockfile):
         if debug:
             print("DEBUG:","Lock found")
         return False
+    # create the lock 
     pid = os.getpid()
     with open(lockfile, 'w') as f:
         f.write(str(pid))
@@ -194,7 +217,7 @@ def main():
     if args.clean:
         if debug:
             print("DEBUG:","Cleaning up logsince hidden files")
-        for f in [lastposfile, lockfile]:
+        for f in [lastposfile, lockfile, get_bakfile(lastposfile)]:
             if os.path.isfile(f):
                 os.unlink(f)
         exit()
@@ -203,6 +226,8 @@ def main():
         print("ERROR:","Cannot create lock for {0}".format(args.logfile), file=sys.stderr)
         exit(1)
     try:
+        # backup first
+        backupfile(lastposfile)
         # read last location from .filename.logsince hidden file - ignore if start is > -1 and use start instead
         lastpos = get_lastpos(args.logfile, lastposfile, start)
         # check if length is passed, if not, go to end of file
@@ -213,6 +238,8 @@ def main():
         if debug:
             print("DEBUG:","Exception caught {0}".format(e))
     finally:
+        # clean bak
+        clean_backupfile(lastposfile)
         # unlock
         if not unlock(lockfile):
             print("ERROR:","Cannot unlock {0}".format(lockfile), file=sys.stderr)
