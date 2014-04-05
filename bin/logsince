@@ -3,7 +3,6 @@
 logsince
 
 Print log from last line printed, creates hidden .logsince and .logsince.LCK files
-Requires sed
 
 Created by Him You Ten on 2014-04-03.
 
@@ -30,7 +29,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 from __future__ import print_function
-import sys
+import sys, traceback
 import argparse
 import os
 import shutil
@@ -41,6 +40,7 @@ start = -1
 length = -1
 lastposfile = ""
 lockfile = ""
+use_sed = False
 
 def getargs():
     """Get the command line arguments"""
@@ -50,10 +50,11 @@ def getargs():
     parser.add_argument('--clean', help="clean up hidden files", action='store_true')
     parser.add_argument('--debug', help="turn debug on", action='store_true')
     parser.add_argument('--test', help="do not write to .logsince file, only read from it", action='store_true')
+    parser.add_argument('--use_sed', help="use sed", action='store_true')
     parser.add_argument('logfile', help="the logifle to parse")
     args = parser.parse_args()
     if args.debug:
-        print("DEBUG:","Settings: --start:{0.start} --length:{0.length} --debug:{0.debug} --test:{0.test} logfile:{0.logfile}".format(args))
+        print("DEBUG:","Settings: --start:{0.start} --length:{0.length} --debug:{0.debug} --test:{0.test} --use_sed:{0.use_sed} logfile:{0.logfile}".format(args))
     set_globals(args)
     return args
 
@@ -72,11 +73,12 @@ def get_bakfile(lastposfile):
 def set_globals(args):
     """Set the global variables from args"""
     # set globals
-    global start, length, debug, test, lastposfile, lockfile
+    global start, length, debug, test, lastposfile, lockfile, use_sed
     start = args.start
     length = args.length
     debug = args.debug
     test = args.test
+    use_sed = args.use_sed
     (dirname, filename) = os.path.split(args.logfile)
     if args.debug:
         print("DEBUG:","dirname:{0} filename:{1}".format(dirname, filename))
@@ -97,12 +99,28 @@ def write_lastsize(lastposfile, filesize):
         if debug:
             print("DEBUG:","new {0} created".format(lastposfile))
 
-def get_lastpos(logfile, lastposfile, start=-1):
+def write_lastpos(lastposfile, lastpos):
+    """Writes the last pos to the logsince file"""
+    if (test):
+        if debug:
+            print("DEBUG:","Test set, not writing")
+        return
+    with open(lastposfile, 'a') as f:
+        f.write(str(lastpos))
+        if debug:
+            print("DEBUG:","{0} updated with last pos {1}".format(lastposfile, str(lastpos)))
+
+
+def get_lastpos(logfile, lastposfile, start=-1, by_byte=False):
     """
     Read last location from .filename.logsince hidden file.
     Ignore if start is > -1 and use start instead
     If size is smaller, start from the beginning
     """
+    default_startpos = 1
+    # if we're doing by bytes and not line count, then start at 0
+    if (by_byte):
+        default_startpos = 0
     lastpos = 1
     filestat = os.stat(logfile)
 
@@ -120,7 +138,7 @@ def get_lastpos(logfile, lastposfile, start=-1):
         if debug:
             print("DEBUG:","Last pos file not found")
             write_lastsize(lastposfile, filestat.st_size)
-        return 1
+        return default_startpos
     # get last pos and last size from file
     with open(lastposfile, 'r') as f:
         lastsize_str = f.readline()
@@ -136,18 +154,21 @@ def get_lastpos(logfile, lastposfile, start=-1):
     if filestat.st_size < lastsize:
         if debug:
             print("DEBUG:","File is smaller, {0} vs {1}, starting from beginning".format(filestat.st_size, lastsize))
-        return 1
+        return default_startpos
     try:
-        lastpos = int(lastpos_str) + 1
+        if (by_byte):
+            lastpos = int(lastpos_str)
+        else:
+            lastpos = int(lastpos_str) + 1
     except:
-        lastpos = 1
+        lastpos = default_startpos
         if debug:
             print("DEBUG:","Last pos found cannot be converted to integer, '{0}'".format(lastpos_str))
     if debug:
         print("DEBUG:","Starting at {0}".format(str(lastpos)))
     return lastpos
 
-def get_length(lastpos):
+def get_length(lastpos, length=-1):
     """Return the end string for the sed"""
     if length == -1:
         return '$'
@@ -196,7 +217,7 @@ def unlock(lockfile):
     os.unlink(lockfile)
     return True
 
-def run_sed(logfile, lastpos, length, lastposfile):
+def print_with_sed(logfile, lastpos, length, lastposfile):
     """Runs the sed cmd, using awk to capture the lastpos"""
     if test:
         if debug:
@@ -205,6 +226,38 @@ def run_sed(logfile, lastpos, length, lastposfile):
     else:        
         cmd = "sed -n '{0},{1} p' {2}|awk '{{print $0}}END{{ print NR + {0} - 1 >> \"{3}\" }}'".format(lastpos, length, logfile, lastposfile)
     os.system(cmd)
+
+
+def print_without_sed(logfile, lastpos, length, lastposfile):
+    """Print using python, use seek to move the the correct location, save the last position"""
+    # print the logfile, get the last position
+    new_lastpos = print_logfile(logfile, lastpos, length)
+    # write the last position to file
+    write_lastpos(lastposfile, new_lastpos)
+
+def print_logfile(logfile, lastpos, length):
+    """Print using python, use seek to move the the correct location"""
+    # open the logfile
+    linecount = 0
+    with open(logfile, 'r') as f:
+        # seek to the lastpos
+        f.seek(lastpos)
+        line = f.readline()
+        while line != "":
+            # print the line
+            print(line.splitlines()[0])
+            # keep count
+            linecount += 1
+            # stop if count reaches length
+            if length > -1 and linecount >= length:
+                if debug:
+                    print("DEBUG:","Length reached, stopping at line count {0}".format(linecount))
+                current_pos = f.tell()
+                return current_pos
+            # read the next line
+            line = f.readline()
+        current_pos = f.tell()
+        return current_pos
 
 def main():
     """
@@ -228,15 +281,21 @@ def main():
     try:
         # backup first
         backupfile(lastposfile)
-        # read last location from .filename.logsince hidden file - ignore if start is > -1 and use start instead
-        lastpos = get_lastpos(args.logfile, lastposfile, start)
-        # check if length is passed, if not, go to end of file
-        length = get_length(lastpos)
-        # sed and pipe to script
-        run_sed(args.logfile, lastpos, length, lastposfile)
+        if use_sed:
+            # read last location from .filename.logsince hidden file - ignore if start is > -1 and use start instead
+            lastpos = get_lastpos(args.logfile, lastposfile, start, False)
+            # check if length is passed, if not, go to end of file
+            length_str = get_length(lastpos, length)
+            # sed and pipe to script
+            print_with_sed(args.logfile, lastpos, length_str, lastposfile)
+        else:
+            # read last location from .filename.logsince hidden file - ignore if start is > -1 and use start instead
+            lastpos = get_lastpos(args.logfile, lastposfile, start, True)
+            print_without_sed(args.logfile, lastpos, length, lastposfile)
     except Exception as e:
         if debug:
             print("DEBUG:","Exception caught {0}".format(e))
+            traceback.print_exc(file=sys.stderr)
     finally:
         # clean bak
         clean_backupfile(lastposfile)
